@@ -157,7 +157,8 @@ class CliTests(unittest.TestCase):
             path = self.folder / (endpoint + '.png')
             with patch.object(sys, 'argv', ['gpt-image', '-p', 'Offline test', '--model', MODELS[0], '-f', str(path), *flags]), \
                  patch.object(cli, '_load_env_chain'), patch.dict(os.environ, {'OPENAI_API_KEY': 'offline-test'}), \
-                 patch.object(cli, 'OpenAI', return_value=self.client) as constructor, contextlib.redirect_stdout(io.StringIO()):
+                 patch.object(cli, 'OpenAI', return_value=self.client) as constructor, \
+                 patch.object(self.client, 'close'), contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(cli.main(), 0)
                 constructor.assert_called_once_with(max_retries=0)
             self.assertEqual(path.read_bytes(), PNG)
@@ -170,7 +171,8 @@ class CliTests(unittest.TestCase):
             path = self.folder / f'{status}.png'
             with patch.object(sys, 'argv', ['gpt-image', '-p', 'Offline test', '--model', MODELS[1], '-f', str(path)]), \
                  patch.object(cli, '_load_env_chain'), patch.dict(os.environ, {'OPENAI_API_KEY': 'offline-test'}), \
-                 patch.object(cli, 'OpenAI', return_value=self.client), contextlib.redirect_stderr(io.StringIO()):
+                 patch.object(cli, 'OpenAI', return_value=self.client), \
+                 patch.object(self.client, 'close'), contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(cli.main(), 1)
             self.assertEqual(len(self.requests), 1)
             self.assertEqual(json.loads(self.requests[0].content)['model'], MODELS[1])

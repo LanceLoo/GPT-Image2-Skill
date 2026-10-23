@@ -4,6 +4,7 @@
 # dependencies = [
 #     "openai>=2.32.0",
 #     "python-dotenv>=1.0",
+#     "json5>=0.9",
 # ]
 # ///
 """General-purpose CLI for OpenAI GPT Image 2 and 2.5.
@@ -50,11 +51,13 @@ import os
 import re
 import sys
 import urllib.request
+from urllib.parse import urlsplit
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
+import json5
 from openai import APIError, OpenAI
 
 
@@ -66,6 +69,58 @@ def _load_env_chain() -> None:
     """
     load_dotenv(Path.cwd() / ".env", override=False)
     load_dotenv(Path.home() / ".env", override=False)
+
+
+def resolve_opencode_provider(provider_id: str, config_path: Path | None) -> tuple[str, str]:
+    """Read one explicit/global config, not OpenCode's merged runtime or auth store."""
+    if config_path is None:
+        config_dir = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "opencode"
+        candidates = [config_dir / name for name in ("opencode.json", "opencode.jsonc")]
+        existing = [path for path in candidates if path.is_file()]
+        if len(existing) != 1:
+            raise ValueError("Specify --opencode-config: expected exactly one global opencode.json/jsonc.")
+        config_path = existing[0]
+    config_path = config_path.expanduser()
+    try:
+        config = json5.loads(config_path.read_text(encoding="utf-8-sig"), allow_duplicate_keys=False)
+    except (OSError, ValueError):
+        # Parser errors may include a source line containing a credential.
+        raise ValueError("Cannot read/parse OpenCode config; check its path and JSON/JSONC syntax.") from None
+    if not isinstance(config, dict):
+        raise ValueError("OpenCode config must be an object.")
+    provider = None
+    for section in ("providers", "provider"):
+        providers = config.get(section)
+        if isinstance(providers, dict) and provider_id in providers:
+            provider = providers[provider_id]
+            break
+    if not isinstance(provider, dict):
+        raise ValueError(
+            f"Selected provider {provider_id!r} is absent or invalid in config {str(config_path.resolve())!r}. "
+            "Checked both providers and provider sections; expected an object keyed by the exact provider ID."
+        )
+    options = provider.get("settings", provider.get("options", {}))
+    if not isinstance(options, dict):
+        raise ValueError("Provider options/settings must be an object.")
+
+    def resolve(value: Any) -> str:
+        if not isinstance(value, str):
+            return ""
+        value = re.sub(r"\{env:([^}]+)\}", lambda m: os.environ.get(m[1], ""), value)
+        if "{file:" in value:
+            raise ValueError("File substitutions are not supported; use an environment reference or inline setting.")
+        return value.strip()
+
+    base_url = resolve(options.get("baseURL"))
+    api_key = resolve(options.get("apiKey"))
+    try:
+        parsed = urlsplit(base_url)
+        valid_url = parsed.scheme in ("http", "https") and parsed.hostname and not parsed.username and not parsed.password and not parsed.query and not parsed.fragment
+    except ValueError:
+        valid_url = False
+    if not valid_url or not api_key:
+        raise ValueError("Provider requires a valid HTTP(S) baseURL and nonempty apiKey; no fallback is used.")
+    return base_url.rstrip("/"), api_key
 
 
 SIZE_SHORTCUTS: dict[str, str] = {
@@ -112,6 +167,8 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("-p", "--prompt", required=True, help="Text prompt / edit instruction.")
+    p.add_argument("--opencode-provider", help="Read URL/key from this provider in OpenCode config.")
+    p.add_argument("--opencode-config", type=Path, help="Explicit JSON/JSONC config; otherwise use the global config.")
     p.add_argument(
         "-f", "--file",
         help="Output path. Auto-generated as YYYY-MM-DD-HH-MM-SS-<slug>.<ext> if omitted "
@@ -166,6 +223,8 @@ def parse_args() -> argparse.Namespace:
         help="Optional end-user identifier forwarded to OpenAI for abuse tracking.",
     )
     args = p.parse_args()
+    if args.opencode_config and not args.opencode_provider:
+        p.error("--opencode-config requires --opencode-provider")
     image25 = re.fullmatch(r"gpt-image-2\.5-(?:flare|sunburst)(?:-\d{4}-\d{2}-\d{2})?", args.model) is not None
     if args.quality in ("xhigh", "max") and not image25:
         p.error("--quality xhigh/max requires --model gpt-image-2.5-flare or gpt-image-2.5-sunburst")
@@ -279,8 +338,17 @@ def write_outputs(data: list[Any], out_path: Path, n: int) -> list[Path]:
 def main() -> int:
     args = parse_args()
 
-    _load_env_chain()
-    if not os.environ.get("OPENAI_API_KEY"):
+    provider_options: dict[str, Any] = {}
+    if args.opencode_provider:
+        try:
+            base_url, api_key = resolve_opencode_provider(args.opencode_provider, args.opencode_config)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        provider_options = {"base_url": base_url, "api_key": api_key}
+    else:
+        _load_env_chain()
+    if not args.opencode_provider and not os.environ.get("OPENAI_API_KEY"):
         print(
             "error: OPENAI_API_KEY not set. Add it to env / .env / ~/.env, or use your host agent's native image tool.",
             file=sys.stderr,
@@ -290,17 +358,22 @@ def main() -> int:
     ext = args.output_format or "png"
     out_path = Path(args.file).expanduser().resolve() if args.file else default_output_path(args.prompt, ext)
 
-    client = OpenAI(max_retries=0)  # No hidden retries of potentially billable generation requests.
+    client = OpenAI(max_retries=0, **provider_options)  # No hidden retries of potentially billable generation requests.
 
     try:
         result = call_edit(client, args) if args.image else call_generate(client, args)
     except APIError as e:
-        print(f"error: {type(e).__name__}: {e}", file=sys.stderr)
+        if args.opencode_provider:
+            print(f"error: {type(e).__name__} (HTTP {getattr(e, 'status_code', None)}); provider response body omitted to protect credentials.", file=sys.stderr)
+        else:
+            print(f"error: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
+    finally:
+        client.close()
 
     data = result.data or []
     if not data:
-        print(f"error: no image data in response: {result}", file=sys.stderr)
+        print("error: no image data in response", file=sys.stderr)
         return 1
 
     for p in write_outputs(data, out_path, args.n):

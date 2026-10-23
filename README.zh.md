@@ -147,7 +147,7 @@ photorealistic, 3D render, flat vector style, pure cel shading, watercolor bleed
 
 | 想做什么 | 使用入口 |
 |---|---|
-| 生成或编辑图片 | [`gpt-image`](skills/gpt-image/SKILL.md) |
+| 使用 OpenCode 配置的服务生成图片 | [`gpt-image`](SKILL.md) · [OpenCode 使用说明](docs/opencode.md) |
 | 从参考图提取 Prompt | [`get-prompt-from-image`](skills/get-prompt-from-image/SKILL.md) |
 | 在终端调用 | 下方 CLI 示例，按选定模型填写 `--model` |
 

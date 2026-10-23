@@ -147,7 +147,7 @@ photorealistic, 3D render, flat vector style, pure cel shading, watercolor bleed
 
 | Task | Use |
 |---|---|
-| Generate or edit an image | [`gpt-image`](skills/gpt-image/SKILL.md) |
+| Generate an image with an OpenCode provider | [`gpt-image`](SKILL.md) · [OpenCode setup](docs/opencode.md) |
 | Extract a prompt from a reference | [`get-prompt-from-image`](skills/get-prompt-from-image/SKILL.md) |
 | Work in a terminal | CLI examples below, with the selected `--model` |
 
